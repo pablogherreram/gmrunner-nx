@@ -35,17 +35,23 @@ namespace {
 struct AudioCallbackContext {
     std::atomic<Audio*> audio{nullptr};
     std::atomic<uint32_t> activeCallbacks{0};
+    std::atomic<uint64_t> totalCallbacks{0};
+    std::atomic<uint64_t> callbacksWithAudio{0};
+    std::atomic<uint64_t> callbacksWithoutAudio{0};
 };
 
 void audioCallback(void* user, Uint8* stream, int len) {
     auto* context = static_cast<AudioCallbackContext*>(user);
     context->activeCallbacks.fetch_add(1, std::memory_order_acq_rel);
+    context->totalCallbacks.fetch_add(1, std::memory_order_relaxed);
 
     Audio* audio = context->audio.load(std::memory_order_acquire);
     if (audio) {
+        context->callbacksWithAudio.fetch_add(1, std::memory_order_relaxed);
         audio->mix(reinterpret_cast<float*>(stream),
                    len / static_cast<int>(sizeof(float) * 2));
     } else {
+        context->callbacksWithoutAudio.fetch_add(1, std::memory_order_relaxed);
         SDL_memset(stream, 0, static_cast<size_t>(len));
     }
 
@@ -380,6 +386,10 @@ int runOnce(int argc, char** argv) {
     const double frameStart = platform.now();
     double nextFrame = frameStart;
     double fpsTimer = frameStart;
+    double audioHeartbeatTimer = frameStart;
+    uint64_t lastCallbackTotal = 0;
+    uint64_t lastCallbackWithAudio = 0;
+    uint64_t lastCallbackWithoutAudio = 0;
     int fpsFrames = 0;
     long frame = 0;
     // game_change(dir, params): the game in `dir` (relative to this game's folder) replaces this
@@ -440,6 +450,32 @@ int runOnce(int argc, char** argv) {
     bool quit = false;
     while (!quit) {
         if (!targetFrame()) break;
+
+        double heartbeatNow = platform.now();
+        if (rt->debugTrace && heartbeatNow - audioHeartbeatTimer >= 1.0) {
+            uint64_t total = audioContext.totalCallbacks.load(std::memory_order_acquire);
+            uint64_t withAudio = audioContext.callbacksWithAudio.load(std::memory_order_acquire);
+            uint64_t withoutAudio = audioContext.callbacksWithoutAudio.load(std::memory_order_acquire);
+            Audio* observed = audioContext.audio.load(std::memory_order_acquire);
+            fprintf(stderr,
+                    "[audio-heartbeat] device=%u status=%d audio=%p active=%u "
+                    "total=%llu delta=%llu with=%llu with_delta=%llu "
+                    "silent=%llu silent_delta=%llu\n",
+                    audioDev, audioDev ? static_cast<int>(SDL_GetAudioDeviceStatus(audioDev)) : -1,
+                    static_cast<void*>(observed),
+                    audioContext.activeCallbacks.load(std::memory_order_acquire),
+                    static_cast<unsigned long long>(total),
+                    static_cast<unsigned long long>(total - lastCallbackTotal),
+                    static_cast<unsigned long long>(withAudio),
+                    static_cast<unsigned long long>(withAudio - lastCallbackWithAudio),
+                    static_cast<unsigned long long>(withoutAudio),
+                    static_cast<unsigned long long>(withoutAudio - lastCallbackWithoutAudio));
+            lastCallbackTotal = total;
+            lastCallbackWithAudio = withAudio;
+            lastCallbackWithoutAudio = withoutAudio;
+            audioHeartbeatTimer = heartbeatNow;
+        }
+
         SDL_Event e;
         // In the background (a phone's home screen, the Switch's HOME menu): no drawing, no sound,
         // the game waits.
