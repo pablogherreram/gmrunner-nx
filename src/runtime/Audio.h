@@ -147,8 +147,21 @@ private:
     std::unordered_map<int, Group> groups_;
     std::vector<SyncGroup> syncs_;
     std::vector<std::string> streamNames_;
+
     double master_ = 1;
     bool allPaused_ = false;
+
+    // gmRunner NX diagnostic counters. Audio::mix writes these while holding mu_;
+    // Audio::update reports and resets them from the game thread.
+    uint64_t diagFrames_ = 0;
+    uint64_t diagSamples_ = 0;
+    uint64_t diagNonZero_ = 0;
+    uint64_t diagNonFinite_ = 0;
+    uint64_t diagCallbacks_ = 0;
+    size_t diagMaxActiveVoices_ = 0;
+    double diagPeak_ = 0;
+    double diagSquareSum_ = 0;
+
 };
 
 }  // namespace gm
