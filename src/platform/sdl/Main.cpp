@@ -350,9 +350,9 @@ int runOnce(int argc, char** argv) {
                 SDL_LockAudioDevice(audioDev);
                 audioContext.audio.store(rt->audio.get(), std::memory_order_release);
                 SDL_UnlockAudioDevice(audioDev);
-                fprintf(stderr, "[audio] rebound device %u to mixer %p\n", audioDev,
-                        static_cast<void*>(rt->audio.get()));
-                SDL_PauseAudioDevice(audioDev, 0);
+                fprintf(stderr, "[audio] rebound device %u to mixer %p, status=%d\n", audioDev,
+                        static_cast<void*>(rt->audio.get()),
+                        static_cast<int>(SDL_GetAudioDeviceStatus(audioDev)));
             }
             rt->audioOutput = audioDev != 0;
         }
@@ -382,14 +382,14 @@ int runOnce(int argc, char** argv) {
     auto changeGame = [&]() -> bool {
         std::string dir = rt->gameChangeDir, paramStr = rt->gameChangeParams;
         if (audioDev) {
-            // Keep the SDL device open across game_change. On Switch, closing and reopening it in
-            // the same process can return a device id whose callback never runs. Detach the old
-            // mixer while the device is paused; startGame attaches the new Runner's Audio object.
-            SDL_PauseAudioDevice(audioDev, 1);
+            // Keep the SDL device running across game_change. The Switch SDL backend may stop
+            // delivering callbacks after a pause/resume at this point. The stable callback context
+            // outputs silence while no mixer is attached, so pausing the device is unnecessary.
             SDL_LockAudioDevice(audioDev);
             audioContext.audio.store(nullptr, std::memory_order_release);
             SDL_UnlockAudioDevice(audioDev);
-            fprintf(stderr, "[audio] detached device %u for game_change\n", audioDev);
+            fprintf(stderr, "[audio] detached device %u for game_change, status=%d\n", audioDev,
+                    static_cast<int>(SDL_GetAudioDeviceStatus(audioDev)));
         }
         rt.reset();
         std::string to = normalizePath(opt.gameDir + "/" + dir);
