@@ -3,6 +3,7 @@
 #include <SDL.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -31,8 +32,17 @@ using namespace gm::host;
 
 namespace {
 
+struct AudioCallbackContext {
+    std::atomic<Audio*> audio{nullptr};
+};
+
 void audioCallback(void* user, Uint8* stream, int len) {
-    auto* audio = static_cast<Audio*>(user);
+    auto* context = static_cast<AudioCallbackContext*>(user);
+    Audio* audio = context->audio.load(std::memory_order_acquire);
+    if (!audio) {
+        SDL_memset(stream, 0, static_cast<size_t>(len));
+        return;
+    }
     audio->mix(reinterpret_cast<float*>(stream), len / static_cast<int>(sizeof(float) * 2));
 }
 
@@ -294,6 +304,7 @@ int runOnce(int argc, char** argv) {
     // One game at a time; game_change replaces it (and its audio device) in the same window.
     std::unique_ptr<Runner> rt;
     SDL_AudioDeviceID audioDev = 0;
+    AudioCallbackContext audioContext;
     auto startGame = [&](const std::vector<std::string>& params) {
         std::string saveDir = opt.saveDir.empty() ? targetSaveDir(gameName, opt.profileSaves) : opt.saveDir;
         makeDirs(saveDir);
@@ -317,16 +328,32 @@ int runOnce(int argc, char** argv) {
             input.menu.draw(r, w, h);
         };
         if (!opt.mute && !opt.headless && opt.recordAudio.empty()) {
-            SDL_AudioSpec want{}, have{};
-            want.freq = Audio::kRate;
-            want.format = AUDIO_F32SYS;
-            want.channels = 2;
-            want.samples = 1024;
-            want.callback = audioCallback;
-            want.userdata = rt->audio.get();
-            audioDev = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
-            if (audioDev) SDL_PauseAudioDevice(audioDev, 0);
-            else fprintf(stderr, "[audio] %s\n", SDL_GetError());
+            if (!audioDev) {
+                SDL_AudioSpec want{}, have{};
+                want.freq = Audio::kRate;
+                want.format = AUDIO_F32SYS;
+                want.channels = 2;
+                want.samples = 1024;
+                want.callback = audioCallback;
+                want.userdata = &audioContext;
+                audioContext.audio.store(rt->audio.get(), std::memory_order_release);
+                audioDev = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
+                if (audioDev) {
+                    fprintf(stderr, "[audio] opened device %u for mixer %p\n", audioDev,
+                            static_cast<void*>(rt->audio.get()));
+                    SDL_PauseAudioDevice(audioDev, 0);
+                } else {
+                    audioContext.audio.store(nullptr, std::memory_order_release);
+                    fprintf(stderr, "[audio] %s\n", SDL_GetError());
+                }
+            } else {
+                SDL_LockAudioDevice(audioDev);
+                audioContext.audio.store(rt->audio.get(), std::memory_order_release);
+                SDL_UnlockAudioDevice(audioDev);
+                fprintf(stderr, "[audio] rebound device %u to mixer %p\n", audioDev,
+                        static_cast<void*>(rt->audio.get()));
+                SDL_PauseAudioDevice(audioDev, 0);
+            }
             rt->audioOutput = audioDev != 0;
         }
     };
@@ -355,8 +382,14 @@ int runOnce(int argc, char** argv) {
     auto changeGame = [&]() -> bool {
         std::string dir = rt->gameChangeDir, paramStr = rt->gameChangeParams;
         if (audioDev) {
-            SDL_CloseAudioDevice(audioDev);
-            audioDev = 0;
+            // Keep the SDL device open across game_change. On Switch, closing and reopening it in
+            // the same process can return a device id whose callback never runs. Detach the old
+            // mixer while the device is paused; startGame attaches the new Runner's Audio object.
+            SDL_PauseAudioDevice(audioDev, 1);
+            SDL_LockAudioDevice(audioDev);
+            audioContext.audio.store(nullptr, std::memory_order_release);
+            SDL_UnlockAudioDevice(audioDev);
+            fprintf(stderr, "[audio] detached device %u for game_change\n", audioDev);
         }
         rt.reset();
         std::string to = normalizePath(opt.gameDir + "/" + dir);
@@ -483,7 +516,13 @@ int runOnce(int argc, char** argv) {
     }
 
     dev.finish(opt);
-    if (audioDev) SDL_CloseAudioDevice(audioDev);
+    if (audioDev) {
+        SDL_PauseAudioDevice(audioDev, 1);
+        SDL_LockAudioDevice(audioDev);
+        audioContext.audio.store(nullptr, std::memory_order_release);
+        SDL_UnlockAudioDevice(audioDev);
+        SDL_CloseAudioDevice(audioDev);
+    }
     rt.reset();
     input.closeAll();
     if (glctx) SDL_GL_DeleteContext(glctx);
