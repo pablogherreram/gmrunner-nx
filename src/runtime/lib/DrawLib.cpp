@@ -205,10 +205,31 @@ GMFN(draw_line_width) { G.drawLine(D(0), D(1), D(2), D(3), D(4), G.color, G.colo
 GMFN(draw_line_color) { G.drawLine(D(0), D(1), D(2), D(3), 1, C(4), C(5), G.alpha); return Value(); }
 GMFN(draw_line_width_color) { G.drawLine(D(0), D(1), D(2), D(3), D(4), C(5), C(6), G.alpha); return Value(); }
 GMFN(draw_circle) {
-    if (rt.debugTrace && G.surfaceGetTarget() == 2 && D(2) >= 39.5 && D(2) <= 40.5)
+    if (rt.debugTrace && G.surfaceGetTarget() == 2 && D(2) >= 39.5 && D(2) <= 40.5) {
         rt.log("[gfxdiag4] draw_circle x=%.3f y=%.3f r=%.3f outline=%d color=%06x alpha=%.3f step=%llu caller=%s",
                D(0), D(1), D(2), B(3) ? 1 : 0, G.color & 0xFFFFFF, G.alpha,
                static_cast<unsigned long long>(rt.stepCount), rt.vm.callStack().c_str());
+        if (self && (rt.stepCount == self->createdStep || (rt.stepCount - self->createdStep) % 30 == 0)) {
+            rt.log("[gfxdiag5] instance id=%d object=%d step=%llu age=%llu x=%.6f y=%.6f xprev=%.6f yprev=%.6f xstart=%.6f ystart=%.6f depth=%.6f image_index=%.6f image_speed=%.6f image_xscale=%.6f image_yscale=%.6f image_angle=%.6f image_alpha=%.6f speed=%.6f direction=%.6f hspeed=%.6f vspeed=%.6f timeline_index=%d timeline_position=%.6f timeline_speed=%.6f timeline_running=%d",
+                   self->id, self->object, static_cast<unsigned long long>(rt.stepCount),
+                   static_cast<unsigned long long>(rt.stepCount - self->createdStep), self->x, self->y,
+                   self->xprevious, self->yprevious, self->xstart, self->ystart, self->depth,
+                   self->imageIndex, self->imageSpeed, self->imageXscale, self->imageYscale,
+                   self->imageAngle, self->imageAlpha, self->speed, self->direction, self->hspeed,
+                   self->vspeed, self->timelineIndex, self->timelinePosition, self->timelineSpeed,
+                   self->timelineRunning ? 1 : 0);
+            rt.log("[gfxdiag5] alarms step=%llu values=[%.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f]",
+                   static_cast<unsigned long long>(rt.stepCount), self->alarm[0], self->alarm[1], self->alarm[2],
+                   self->alarm[3], self->alarm[4], self->alarm[5], self->alarm[6], self->alarm[7],
+                   self->alarm[8], self->alarm[9], self->alarm[10], self->alarm[11]);
+            self->vars.forEachInOrder([&](int32_t id, const Value& v) {
+                rt.log("[gfxdiag5] var step=%llu id=%d name=%s type=%d numeric=%d value=%s",
+                       static_cast<unsigned long long>(rt.stepCount), id,
+                       std::string(rt.vm.varName(id)).c_str(), static_cast<int>(v.type()),
+                       v.isNumeric() ? 1 : 0, v.repr().c_str());
+            });
+        }
+    }
     G.drawEllipse(D(0) - D(2), D(1) - D(2), D(0) + D(2), D(1) + D(2), B(3), G.color, G.color, G.alpha);
     return Value();
 }
