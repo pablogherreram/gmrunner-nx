@@ -1530,6 +1530,8 @@ int Graphics::surfaceWidth(int id) const { return surfaceExists(id) ? r_.targetW
 int Graphics::surfaceHeight(int id) const { return surfaceExists(id) ? r_.targetHeight(surfaces_[id]) : -1; }
 
 void Graphics::surfaceResize(int id, int w, int h) {
+    if (rt_.debugTrace && id == 2)
+        rt_.log("[gfxdiag2] resize id=2 old=%dx%d new=%dx%d", surfaceWidth(id), surfaceHeight(id), w, h);
     if (id < 0 && appSurface_ < 0 && w > 0 && h > 0) {  // application_surface before the first draw
         appW_ = w;
         appH_ = h;
@@ -1587,6 +1589,12 @@ void Graphics::drawSurface(int id, double x, double y, double xs, double ys, dou
     int t = surfaces_[id];
     int w = r_.targetWidth(t), h = r_.targetHeight(t);
     if (t == curTarget_) return;  // GL can't sample the bound target
+    if (rt_.debugTrace && id == 2) {
+        const float* m = r_.worldMatrix();
+        rt_.log("[gfxdiag2] draw id=2 kind=full src=%dx%d x=%.2f y=%.2f xs=%.4f ys=%.4f rot=%.2f a=%.3f col=%06x target=%d shader=%d world=[%.4f %.4f %.4f %.4f %.4f %.4f]",
+                w, h, x, y, xs, ys, rot, a, col & 0xFFFFFF, surfaceGetTarget(), shader_,
+                m[0], m[1], m[4], m[5], m[12], m[13]);
+    }
     drawTexRect(r_.targetTexture(t), w, h, 0, 0, w, h, 0, 0, w, h, x, y, xs, ys, rot, col, a);
 }
 
@@ -1599,6 +1607,12 @@ void Graphics::drawSurfacePart(int id, double left, double top, double w, double
     double l = std::max(0.0, left), tp = std::max(0.0, top);
     double r = std::min<double>(sw, left + w), b = std::min<double>(sh, top + h);
     if (r <= l || b <= tp) return;
+    if (rt_.debugTrace && id == 2) {
+        const float* m = r_.worldMatrix();
+        rt_.log("[gfxdiag2] draw id=2 kind=part src=%.2f,%.2f,%.2f,%.2f x=%.2f y=%.2f xs=%.4f ys=%.4f a=%.3f target=%d shader=%d world=[%.4f %.4f %.4f %.4f %.4f %.4f]",
+                left, top, w, h, x, y, xs, ys, a, surfaceGetTarget(), shader_,
+                m[0], m[1], m[4], m[5], m[12], m[13]);
+    }
     drawTexRect(r_.targetTexture(t), sw, sh, l, tp, r - l, b - tp, l - left, tp - top, r - l, b - tp, x, y, xs, ys, 0,
                 col, a);
 }
@@ -1630,6 +1644,12 @@ void Graphics::drawSurfaceGeneral(int id, double left, double top, double w, dou
     double r = std::min<double>(sw, left + w), b = std::min<double>(sh, top + h);
     if (r <= l || b <= tp) return;
     const uint32_t packed[4] = {packColor(cols[0], a), packColor(cols[1], a), packColor(cols[2], a), packColor(cols[3], a)};
+    if (rt_.debugTrace && id == 2) {
+        const float* m = r_.worldMatrix();
+        rt_.log("[gfxdiag2] draw id=2 kind=general src=%.2f,%.2f,%.2f,%.2f x=%.2f y=%.2f xs=%.4f ys=%.4f rot=%.2f a=%.3f target=%d shader=%d world=[%.4f %.4f %.4f %.4f %.4f %.4f]",
+                left, top, w, h, x, y, xs, ys, rot, a, surfaceGetTarget(), shader_,
+                m[0], m[1], m[4], m[5], m[12], m[13]);
+    }
     drawTexRect4(r_.targetTexture(t), sw, sh, l, tp, r - l, b - tp, l - left, tp - top, r - l, b - tp, x, y, xs, ys,
                  rot, packed);
 }
