@@ -224,6 +224,29 @@ GMFN(draw_circle) {
                 rt.log("[gfxdiag6] invalid current code index=%d", code);
             }
         }
+        static bool scannedFinishRefs = false;
+        if (!scannedFinishRefs) {
+            scannedFinishRefs = true;
+            int matches = 0;
+            for (size_t ci = 0; ci < rt.dw.code.size(); ++ci) {
+                std::istringstream input(disassemble(rt.dw, rt.dw.code[ci]));
+                std::vector<std::string> lines;
+                std::string line;
+                while (std::getline(input, line)) lines.push_back(line);
+                for (size_t li = 0; li < lines.size(); ++li) {
+                    if (lines[li].find(".finish") == std::string::npos) continue;
+                    ++matches;
+                    const bool write = lines[li].find("pop.") != std::string::npos;
+                    rt.log("[gfxdiag7] match=%d code=%zu name=%s kind=%s line=%s", matches, ci,
+                           std::string(rt.dw.code[ci].name).c_str(), write ? "WRITE" : "READ", lines[li].c_str());
+                    size_t first = li > 8 ? li - 8 : 0;
+                    size_t last = std::min(lines.size(), li + 9);
+                    for (size_t k = first; k < last; ++k)
+                        rt.log("[gfxdiag7] context code=%zu %s", ci, lines[k].c_str());
+                }
+            }
+            rt.log("[gfxdiag7] scan_complete matches=%d code_entries=%zu", matches, rt.dw.code.size());
+        }
         if (self && (rt.stepCount == self->createdStep || (rt.stepCount - self->createdStep) % 30 == 0)) {
             rt.log("[gfxdiag5] instance id=%d object=%d step=%llu age=%llu x=%.6f y=%.6f xprev=%.6f yprev=%.6f xstart=%.6f ystart=%.6f depth=%.6f image_index=%.6f image_speed=%.6f image_xscale=%.6f image_yscale=%.6f image_angle=%.6f image_alpha=%.6f speed=%.6f direction=%.6f hspeed=%.6f vspeed=%.6f timeline_index=%d timeline_position=%.6f timeline_speed=%.6f timeline_running=%d",
                    self->id, self->object, static_cast<unsigned long long>(rt.stepCount),
