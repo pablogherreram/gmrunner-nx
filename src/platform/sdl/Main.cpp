@@ -32,31 +32,11 @@ using namespace gm::host;
 
 namespace {
 
-struct AudioCallbackContext {
-    std::atomic<Audio*> audio{nullptr};
-    std::atomic<uint32_t> activeCallbacks{0};
-    std::atomic<uint64_t> totalCallbacks{0};
-    std::atomic<uint64_t> callbacksWithAudio{0};
-    std::atomic<uint64_t> callbacksWithoutAudio{0};
-};
-
-void audioCallback(void* user, Uint8* stream, int len) {
-    auto* context = static_cast<AudioCallbackContext*>(user);
-    context->activeCallbacks.fetch_add(1, std::memory_order_acq_rel);
-    context->totalCallbacks.fetch_add(1, std::memory_order_relaxed);
-
-    Audio* audio = context->audio.load(std::memory_order_acquire);
-    if (audio) {
-        context->callbacksWithAudio.fetch_add(1, std::memory_order_relaxed);
-        audio->mix(reinterpret_cast<float*>(stream),
-                   len / static_cast<int>(sizeof(float) * 2));
-    } else {
-        context->callbacksWithoutAudio.fetch_add(1, std::memory_order_relaxed);
-        SDL_memset(stream, 0, static_cast<size_t>(len));
-    }
-
-    context->activeCallbacks.fetch_sub(1, std::memory_order_release);
-}
+constexpr int kQueuedAudioFrames = 1024;
+constexpr int kQueuedAudioChannels = 2;
+constexpr Uint32 kQueuedAudioBlockBytes =
+    kQueuedAudioFrames * kQueuedAudioChannels * static_cast<Uint32>(sizeof(float));
+constexpr Uint32 kQueuedAudioTargetBlocks = 3;
 
 std::string gameNameOf(const DataWin& dw) { return dw.gen.name.empty() ? "game" : std::string(dw.gen.name); }
 
@@ -316,7 +296,7 @@ int runOnce(int argc, char** argv) {
     // One game at a time; game_change replaces it (and its audio device) in the same window.
     std::unique_ptr<Runner> rt;
     SDL_AudioDeviceID audioDev = 0;
-    AudioCallbackContext audioContext;
+    std::vector<float> queuedAudioBuffer(kQueuedAudioFrames * kQueuedAudioChannels);
     auto startGame = [&](const std::vector<std::string>& params) {
         std::string saveDir = opt.saveDir.empty() ? targetSaveDir(gameName, opt.profileSaves) : opt.saveDir;
         makeDirs(saveDir);
@@ -344,29 +324,44 @@ int runOnce(int argc, char** argv) {
                 SDL_AudioSpec want{}, have{};
                 want.freq = Audio::kRate;
                 want.format = AUDIO_F32SYS;
-                want.channels = 2;
-                want.samples = 1024;
-                want.callback = audioCallback;
-                want.userdata = &audioContext;
-                audioContext.audio.store(rt->audio.get(), std::memory_order_release);
+                want.channels = kQueuedAudioChannels;
+                want.samples = kQueuedAudioFrames;
+                want.callback = nullptr;
+                want.userdata = nullptr;
                 audioDev = SDL_OpenAudioDevice(nullptr, 0, &want, &have, 0);
                 if (audioDev) {
-                    fprintf(stderr, "[audio] opened device %u for mixer %p\n", audioDev,
-                            static_cast<void*>(rt->audio.get()));
+                    fprintf(stderr,
+                            "[audio-queue] opened device %u, freq=%d format=0x%x channels=%u "
+                            "samples=%u block=%u target=%u\n",
+                            audioDev, have.freq, have.format, have.channels, have.samples,
+                            kQueuedAudioBlockBytes,
+                            kQueuedAudioBlockBytes * kQueuedAudioTargetBlocks);
                     SDL_PauseAudioDevice(audioDev, 0);
                 } else {
-                    audioContext.audio.store(nullptr, std::memory_order_release);
-                    fprintf(stderr, "[audio] %s\n", SDL_GetError());
+                    fprintf(stderr, "[audio-queue] open failed: %s\n", SDL_GetError());
                 }
             } else {
-                audioContext.audio.store(rt->audio.get(), std::memory_order_release);
+                SDL_ClearQueuedAudio(audioDev);
                 fprintf(stderr,
-                        "[audio] rebound device %u to mixer %p, status=%d, active=%u\n",
+                        "[audio-queue] attached device %u to mixer %p, status=%d, queued=%u\n",
                         audioDev, static_cast<void*>(rt->audio.get()),
                         static_cast<int>(SDL_GetAudioDeviceStatus(audioDev)),
-                        audioContext.activeCallbacks.load(std::memory_order_acquire));
+                        SDL_GetQueuedAudioSize(audioDev));
             }
             rt->audioOutput = audioDev != 0;
+        }
+    };
+    auto pumpQueuedAudio = [&]() {
+        if (!audioDev || !rt || opt.mute || opt.headless || !opt.recordAudio.empty()) return;
+        const Uint32 target = kQueuedAudioBlockBytes * kQueuedAudioTargetBlocks;
+        int blocks = 0;
+        while (SDL_GetQueuedAudioSize(audioDev) < target && blocks < 4) {
+            rt->audio->mix(queuedAudioBuffer.data(), kQueuedAudioFrames);
+            if (SDL_QueueAudio(audioDev, queuedAudioBuffer.data(), kQueuedAudioBlockBytes) != 0) {
+                fprintf(stderr, "[audio-queue] queue failed: %s\n", SDL_GetError());
+                break;
+            }
+            blocks++;
         }
     };
     std::vector<std::string> params = {argv[0]};
@@ -386,10 +381,6 @@ int runOnce(int argc, char** argv) {
     const double frameStart = platform.now();
     double nextFrame = frameStart;
     double fpsTimer = frameStart;
-    double audioHeartbeatTimer = frameStart;
-    uint64_t lastCallbackTotal = 0;
-    uint64_t lastCallbackWithAudio = 0;
-    uint64_t lastCallbackWithoutAudio = 0;
     int fpsFrames = 0;
     long frame = 0;
     // game_change(dir, params): the game in `dir` (relative to this game's folder) replaces this
@@ -398,18 +389,11 @@ int runOnce(int argc, char** argv) {
     auto changeGame = [&]() -> bool {
         std::string dir = rt->gameChangeDir, paramStr = rt->gameChangeParams;
         if (audioDev) {
-            // Do not call SDL_LockAudioDevice here: the Switch SDL backend may stop delivering
-            // callbacks after a lock/unlock cycle during game_change. Detach atomically, then wait
-            // until every callback that could still hold the old pointer has returned.
-            audioContext.audio.exchange(nullptr, std::memory_order_acq_rel);
-            uint32_t spins = 0;
-            while (audioContext.activeCallbacks.load(std::memory_order_acquire) != 0) {
-                SDL_Delay(1);
-                spins++;
-            }
+            SDL_ClearQueuedAudio(audioDev);
             fprintf(stderr,
-                    "[audio] detached device %u for game_change, status=%d, drained=%u\n",
-                    audioDev, static_cast<int>(SDL_GetAudioDeviceStatus(audioDev)), spins);
+                    "[audio-queue] cleared device %u for game_change, status=%d, queued=%u\n",
+                    audioDev, static_cast<int>(SDL_GetAudioDeviceStatus(audioDev)),
+                    SDL_GetQueuedAudioSize(audioDev));
         }
         rt.reset();
         std::string to = normalizePath(opt.gameDir + "/" + dir);
@@ -451,30 +435,7 @@ int runOnce(int argc, char** argv) {
     while (!quit) {
         if (!targetFrame()) break;
 
-        double heartbeatNow = platform.now();
-        if (rt->debugTrace && heartbeatNow - audioHeartbeatTimer >= 1.0) {
-            uint64_t total = audioContext.totalCallbacks.load(std::memory_order_acquire);
-            uint64_t withAudio = audioContext.callbacksWithAudio.load(std::memory_order_acquire);
-            uint64_t withoutAudio = audioContext.callbacksWithoutAudio.load(std::memory_order_acquire);
-            Audio* observed = audioContext.audio.load(std::memory_order_acquire);
-            fprintf(stderr,
-                    "[audio-heartbeat] device=%u status=%d audio=%p active=%u "
-                    "total=%llu delta=%llu with=%llu with_delta=%llu "
-                    "silent=%llu silent_delta=%llu\n",
-                    audioDev, audioDev ? static_cast<int>(SDL_GetAudioDeviceStatus(audioDev)) : -1,
-                    static_cast<void*>(observed),
-                    audioContext.activeCallbacks.load(std::memory_order_acquire),
-                    static_cast<unsigned long long>(total),
-                    static_cast<unsigned long long>(total - lastCallbackTotal),
-                    static_cast<unsigned long long>(withAudio),
-                    static_cast<unsigned long long>(withAudio - lastCallbackWithAudio),
-                    static_cast<unsigned long long>(withoutAudio),
-                    static_cast<unsigned long long>(withoutAudio - lastCallbackWithoutAudio));
-            lastCallbackTotal = total;
-            lastCallbackWithAudio = withAudio;
-            lastCallbackWithoutAudio = withoutAudio;
-            audioHeartbeatTimer = heartbeatNow;
-        }
+        pumpQueuedAudio();
 
         SDL_Event e;
         // In the background (a phone's home screen, the Switch's HOME menu): no drawing, no sound,
@@ -482,7 +443,10 @@ int runOnce(int argc, char** argv) {
         auto away = [] { return SDL_AtomicGet(&gBackground) || targetSuspended(); };
         if (away()) {
             fprintf(stderr, "[run] in the background at frame %ld: paused\n", frame);
-            if (audioDev) SDL_PauseAudioDevice(audioDev, 1);
+            if (audioDev) {
+                SDL_PauseAudioDevice(audioDev, 1);
+                SDL_ClearQueuedAudio(audioDev);
+            }
             input.touchPad.releaseAll(*rt);
             while (away() && !quit) {
                 if (SDL_WaitEventTimeout(&e, 100)) input.handleEvent(e, *rt, platform, opt, quit);
@@ -490,17 +454,26 @@ int runOnce(int argc, char** argv) {
             }
             if (quit) break;
             fprintf(stderr, "[run] back in the foreground: resumed\n");
-            if (audioDev) SDL_PauseAudioDevice(audioDev, 0);
+            if (audioDev) {
+                SDL_ClearQueuedAudio(audioDev);
+                SDL_PauseAudioDevice(audioDev, 0);
+            }
             nextFrame = platform.now();  // don't race to catch up on the time away
             continue;
         }
         if (input.menu.open) {  // the in-game menu: the game waits, silent, under it
-            if (audioDev) SDL_PauseAudioDevice(audioDev, 1);
+            if (audioDev) {
+                SDL_PauseAudioDevice(audioDev, 1);
+                SDL_ClearQueuedAudio(audioDev);
+            }
             while (SDL_PollEvent(&e)) input.handleEvent(e, *rt, platform, opt, quit);
             targetPollInput(*rt, input.buttons, opt, quit);
             input.menu.poll();
             input.menu.tick(*rt, platform.now());
-            if (!input.menu.open && audioDev) SDL_PauseAudioDevice(audioDev, 0);
+            if (!input.menu.open && audioDev) {
+                SDL_ClearQueuedAudio(audioDev);
+                SDL_PauseAudioDevice(audioDev, 0);
+            }
             if (platform.window) {
                 int w, h;
                 platform.drawableSize(w, h);
@@ -564,9 +537,7 @@ int runOnce(int argc, char** argv) {
     dev.finish(opt);
     if (audioDev) {
         SDL_PauseAudioDevice(audioDev, 1);
-        SDL_LockAudioDevice(audioDev);
-        audioContext.audio.store(nullptr, std::memory_order_release);
-        SDL_UnlockAudioDevice(audioDev);
+        SDL_ClearQueuedAudio(audioDev);
         SDL_CloseAudioDevice(audioDev);
     }
     rt.reset();
