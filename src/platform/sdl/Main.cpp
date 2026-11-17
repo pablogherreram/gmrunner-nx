@@ -34,16 +34,22 @@ namespace {
 
 struct AudioCallbackContext {
     std::atomic<Audio*> audio{nullptr};
+    std::atomic<uint32_t> activeCallbacks{0};
 };
 
 void audioCallback(void* user, Uint8* stream, int len) {
     auto* context = static_cast<AudioCallbackContext*>(user);
+    context->activeCallbacks.fetch_add(1, std::memory_order_acq_rel);
+
     Audio* audio = context->audio.load(std::memory_order_acquire);
-    if (!audio) {
+    if (audio) {
+        audio->mix(reinterpret_cast<float*>(stream),
+                   len / static_cast<int>(sizeof(float) * 2));
+    } else {
         SDL_memset(stream, 0, static_cast<size_t>(len));
-        return;
     }
-    audio->mix(reinterpret_cast<float*>(stream), len / static_cast<int>(sizeof(float) * 2));
+
+    context->activeCallbacks.fetch_sub(1, std::memory_order_release);
 }
 
 std::string gameNameOf(const DataWin& dw) { return dw.gen.name.empty() ? "game" : std::string(dw.gen.name); }
@@ -347,12 +353,12 @@ int runOnce(int argc, char** argv) {
                     fprintf(stderr, "[audio] %s\n", SDL_GetError());
                 }
             } else {
-                SDL_LockAudioDevice(audioDev);
                 audioContext.audio.store(rt->audio.get(), std::memory_order_release);
-                SDL_UnlockAudioDevice(audioDev);
-                fprintf(stderr, "[audio] rebound device %u to mixer %p, status=%d\n", audioDev,
-                        static_cast<void*>(rt->audio.get()),
-                        static_cast<int>(SDL_GetAudioDeviceStatus(audioDev)));
+                fprintf(stderr,
+                        "[audio] rebound device %u to mixer %p, status=%d, active=%u\n",
+                        audioDev, static_cast<void*>(rt->audio.get()),
+                        static_cast<int>(SDL_GetAudioDeviceStatus(audioDev)),
+                        audioContext.activeCallbacks.load(std::memory_order_acquire));
             }
             rt->audioOutput = audioDev != 0;
         }
@@ -382,14 +388,18 @@ int runOnce(int argc, char** argv) {
     auto changeGame = [&]() -> bool {
         std::string dir = rt->gameChangeDir, paramStr = rt->gameChangeParams;
         if (audioDev) {
-            // Keep the SDL device running across game_change. The Switch SDL backend may stop
-            // delivering callbacks after a pause/resume at this point. The stable callback context
-            // outputs silence while no mixer is attached, so pausing the device is unnecessary.
-            SDL_LockAudioDevice(audioDev);
-            audioContext.audio.store(nullptr, std::memory_order_release);
-            SDL_UnlockAudioDevice(audioDev);
-            fprintf(stderr, "[audio] detached device %u for game_change, status=%d\n", audioDev,
-                    static_cast<int>(SDL_GetAudioDeviceStatus(audioDev)));
+            // Do not call SDL_LockAudioDevice here: the Switch SDL backend may stop delivering
+            // callbacks after a lock/unlock cycle during game_change. Detach atomically, then wait
+            // until every callback that could still hold the old pointer has returned.
+            audioContext.audio.exchange(nullptr, std::memory_order_acq_rel);
+            uint32_t spins = 0;
+            while (audioContext.activeCallbacks.load(std::memory_order_acquire) != 0) {
+                SDL_Delay(1);
+                spins++;
+            }
+            fprintf(stderr,
+                    "[audio] detached device %u for game_change, status=%d, drained=%u\n",
+                    audioDev, static_cast<int>(SDL_GetAudioDeviceStatus(audioDev)), spins);
         }
         rt.reset();
         std::string to = normalizePath(opt.gameDir + "/" + dir);
