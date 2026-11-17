@@ -398,10 +398,14 @@ void Graphics::setBlendMode(int mode) {
 void Graphics::setBlendModeExt(int src, int dst) { setBlendModeExtSepAlpha(src, dst, src, dst); }
 
 void Graphics::setBlendModeExtSepAlpha(int src, int dst, int srcAlpha, int dstAlpha) {
+    const bool changed = src != blendSrc_ || dst != blendDst_ || srcAlpha != blendSrcA_ || dstAlpha != blendDstA_;
     blendSrc_ = src;
     blendDst_ = dst;
     blendSrcA_ = srcAlpha;
     blendDstA_ = dstAlpha;
+    if (changed && rt_.debugTrace)
+        rt_.log("[gfxdiag] blend src=%d dst=%d srcA=%d dstA=%d eq=0x%x eqA=0x%x alpha=%d",
+                src, dst, srcAlpha, dstAlpha, blendEq_, blendEqA_, alphaBlend_ ? 1 : 0);
     setAlphaBlend(alphaBlend_);
 }
 
@@ -866,6 +870,24 @@ void Graphics::drawLine(double x1, double y1, double x2, double y2, double width
 void Graphics::drawEllipse(double x1, double y1, double x2, double y2, bool outline, uint32_t c1, uint32_t c2,
                            double a) {
     double cx = (x1 + x2) / 2, cy = (y1 + y2) / 2, rx = std::fabs(x2 - x1) / 2, ry = std::fabs(y2 - y1) / 2;
+    if (rt_.debugTrace && !outline) {
+        static double lastCx = 1e30, lastCy = 1e30, lastRx = 1e30, lastRy = 1e30, lastA = 1e30;
+        static uint32_t lastC1 = ~0u, lastC2 = ~0u;
+        static int lastSrc = -1, lastDst = -1, lastSrcA = -1, lastDstA = -1;
+        const bool changed = std::fabs(cx - lastCx) > 0.25 || std::fabs(cy - lastCy) > 0.25 ||
+                             std::fabs(rx - lastRx) > 0.25 || std::fabs(ry - lastRy) > 0.25 ||
+                             std::fabs(a - lastA) > 0.005 || c1 != lastC1 || c2 != lastC2 ||
+                             blendSrc_ != lastSrc || blendDst_ != lastDst ||
+                             blendSrcA_ != lastSrcA || blendDstA_ != lastDstA;
+        if (changed) {
+            rt_.log("[gfxdiag] ellipse cx=%.2f cy=%.2f rx=%.2f ry=%.2f c1=%06x c2=%06x a=%.3f blend=%d,%d,%d,%d target=%d",
+                    cx, cy, rx, ry, c1 & 0xFFFFFF, c2 & 0xFFFFFF, a,
+                    blendSrc_, blendDst_, blendSrcA_, blendDstA_, surfaceGetTarget());
+            lastCx = cx; lastCy = cy; lastRx = rx; lastRy = ry; lastA = a;
+            lastC1 = c1; lastC2 = c2; lastSrc = blendSrc_; lastDst = blendDst_;
+            lastSrcA = blendSrcA_; lastDstA = blendDstA_;
+        }
+    }
     int n = std::max(4, circlePrecision);
     uint32_t inner = packColor(c1, a), outer = packColor(c2, a);
     r_.setTexture(r_.whiteTexture());
@@ -1527,6 +1549,9 @@ bool Graphics::surfaceSetTarget(int id) {
     targetStack_.push_back(currentState());
     int t = surfaces_[id];
     bindAndSetup(t, r_.targetWidth(t), r_.targetHeight(t));
+    if (rt_.debugTrace)
+        rt_.log("[gfxdiag] surface target id=%d size=%dx%d depth=%zu", id,
+                r_.targetWidth(t), r_.targetHeight(t), targetStack_.size());
     return true;
 }
 
@@ -1535,6 +1560,8 @@ bool Graphics::surfaceResetTarget() {
     TargetState s = targetStack_.back();
     targetStack_.pop_back();
     restoreState(s);
+    if (rt_.debugTrace)
+        rt_.log("[gfxdiag] surface reset remaining=%zu gml_target=%d", targetStack_.size(), surfaceGetTarget());
     return true;
 }
 
