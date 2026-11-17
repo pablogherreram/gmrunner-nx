@@ -205,10 +205,18 @@ GMFN(draw_line_width) { G.drawLine(D(0), D(1), D(2), D(3), D(4), G.color, G.colo
 GMFN(draw_line_color) { G.drawLine(D(0), D(1), D(2), D(3), 1, C(4), C(5), G.alpha); return Value(); }
 GMFN(draw_line_width_color) { G.drawLine(D(0), D(1), D(2), D(3), D(4), C(5), C(6), G.alpha); return Value(); }
 GMFN(draw_circle) {
+    if (rt.debugTrace && G.surfaceGetTarget() == 2 && D(2) >= 39.5 && D(2) <= 40.5)
+        rt.log("[gfxdiag4] draw_circle x=%.3f y=%.3f r=%.3f outline=%d color=%06x alpha=%.3f step=%llu caller=%s",
+               D(0), D(1), D(2), B(3) ? 1 : 0, G.color & 0xFFFFFF, G.alpha,
+               static_cast<unsigned long long>(rt.stepCount), rt.vm.callStack().c_str());
     G.drawEllipse(D(0) - D(2), D(1) - D(2), D(0) + D(2), D(1) + D(2), B(3), G.color, G.color, G.alpha);
     return Value();
 }
 GMFN(draw_circle_color) {
+    if (rt.debugTrace && G.surfaceGetTarget() == 2 && D(2) >= 39.5 && D(2) <= 40.5)
+        rt.log("[gfxdiag4] draw_circle_color x=%.3f y=%.3f r=%.3f outline=%d c1=%06x c2=%06x alpha=%.3f step=%llu caller=%s",
+               D(0), D(1), D(2), B(5) ? 1 : 0, C(3) & 0xFFFFFF, C(4) & 0xFFFFFF, G.alpha,
+               static_cast<unsigned long long>(rt.stepCount), rt.vm.callStack().c_str());
     G.drawEllipse(D(0) - D(2), D(1) - D(2), D(0) + D(2), D(1) + D(2), B(5), C(3), C(4), G.alpha);
     return Value();
 }
@@ -281,8 +289,20 @@ GMFN(draw_vertex_color) { G.primitiveVertex(D(0), D(1), C(2), D(3)); return Valu
 GMFN(draw_vertex_texture) { G.primitiveVertex(D(0), D(1), G.color, G.alpha, D(2), D(3)); return Value(); }
 GMFN(draw_vertex_texture_color) { G.primitiveVertex(D(0), D(1), C(4), D(5), D(2), D(3)); return Value(); }
 GMFN(draw_primitive_end) { G.primitiveEnd(); return Value(); }
-GMFN(draw_clear) { G.drawClear(C(0), 1); return Value(); }
-GMFN(draw_clear_alpha) { G.drawClear(C(0), D(1)); return Value(); }
+GMFN(draw_clear) {
+    if (rt.debugTrace && G.surfaceGetTarget() == 2)
+        rt.log("[gfxdiag4] clear target=2 color=%06x alpha=1.000 step=%llu caller=%s", C(0) & 0xFFFFFF,
+               static_cast<unsigned long long>(rt.stepCount), rt.vm.callStack().c_str());
+    G.drawClear(C(0), 1);
+    return Value();
+}
+GMFN(draw_clear_alpha) {
+    if (rt.debugTrace && G.surfaceGetTarget() == 2)
+        rt.log("[gfxdiag4] clear_alpha target=2 color=%06x alpha=%.3f step=%llu caller=%s", C(0) & 0xFFFFFF, D(1),
+               static_cast<unsigned long long>(rt.stepCount), rt.vm.callStack().c_str());
+    G.drawClear(C(0), D(1));
+    return Value();
+}
 
 // ---- surfaces
 GMFN(surface_create) { return Value(static_cast<double>(G.surfaceCreate(I(0), I(1)))); }
