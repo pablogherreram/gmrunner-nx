@@ -355,29 +355,106 @@ Audio::Voice* Audio::voice(int id) {
     return nullptr;
 }
 
+
+
 void Audio::mix(float* out, int frames) {
     std::memset(out, 0, sizeof(float) * frames * 2);
     std::lock_guard<std::mutex> lock(mu_);
-    if (allPaused_ || muted) return;
-    for (auto& v : voices_) {
-        if (v->paused || v->finished || !v->src) continue;
-        Asset& a = assets_[v->sound];
-        double g = master_ * v->gain * a.gain;
-        double savedPitch = v->pitch;
-        v->pitch = savedPitch * a.pitch * v->mixPitch;
-        v->render(out, frames, g * v->mixL, g * v->mixR);
-        v->pitch = savedPitch;
+
+    size_t activeVoices = 0;
+
+    if (!allPaused_ && !muted) {
+        for (auto& v : voices_) {
+            if (v->paused || v->finished || !v->src) continue;
+
+            activeVoices++;
+
+            Asset& a = assets_[v->sound];
+            double g = master_ * v->gain * a.gain;
+            double savedPitch = v->pitch;
+            v->pitch = savedPitch * a.pitch * v->mixPitch;
+            v->render(out, frames, g * v->mixL, g * v->mixR);
+            v->pitch = savedPitch;
+        }
+
+        // Soft-knee limiter: transparent below 0.9, smoothly saturating above
+        // instead of hard clipping.
+        for (int i = 0; i < frames * 2; i++) {
+            float x = out[i], ax = std::fabs(x);
+            if (ax > 0.9f) {
+                out[i] = std::copysign(
+                    0.9f + 0.1f * std::tanh((ax - 0.9f) / 0.1f), x);
+            }
+        }
     }
-    // Soft-knee limiter: transparent below 0.9, smoothly saturating above instead of hard clipping.
-    for (int i = 0; i < frames * 2; i++) {
-        float x = out[i], ax = std::fabs(x);
-        if (ax > 0.9f) out[i] = std::copysign(0.9f + 0.1f * std::tanh((ax - 0.9f) / 0.1f), x);
+
+    if (rt_.debugTrace) {
+        diagCallbacks_++;
+        diagFrames_ += static_cast<uint64_t>(frames);
+        diagSamples_ += static_cast<uint64_t>(frames) * 2;
+        diagMaxActiveVoices_ =
+            std::max(diagMaxActiveVoices_, activeVoices);
+
+        for (int i = 0; i < frames * 2; i++) {
+            double sample = out[i];
+
+            if (!std::isfinite(sample)) {
+                diagNonFinite_++;
+                continue;
+            }
+
+            double absolute = std::fabs(sample);
+            if (absolute > 0) diagNonZero_++;
+            diagPeak_ = std::max(diagPeak_, absolute);
+            diagSquareSum_ += sample * sample;
+        }
     }
 }
+
+
+
+
+
+
 
 void Audio::update() {
     if (beforeUpdate) beforeUpdate();
     std::lock_guard<std::mutex> lock(mu_);
+
+        if (rt_.debugTrace && diagFrames_ >= static_cast<uint64_t>(kRate)) {
+        double rms = diagSamples_ > 0
+            ? std::sqrt(diagSquareSum_ / static_cast<double>(diagSamples_))
+            : 0;
+
+        rt_.log(
+            "[mixer] callbacks=%llu frames=%llu voices=%zu samples=%llu "
+            "nonzero=%llu nonfinite=%llu peak=%.6f rms=%.6f "
+            "master=%.3f paused=%d muted=%d",
+            static_cast<unsigned long long>(diagCallbacks_),
+            static_cast<unsigned long long>(diagFrames_),
+            diagMaxActiveVoices_,
+            static_cast<unsigned long long>(diagSamples_),
+            static_cast<unsigned long long>(diagNonZero_),
+            static_cast<unsigned long long>(diagNonFinite_),
+            diagPeak_,
+            rms,
+            master_,
+            allPaused_ ? 1 : 0,
+            muted ? 1 : 0);
+
+        diagFrames_ = 0;
+        diagSamples_ = 0;
+        diagNonZero_ = 0;
+        diagNonFinite_ = 0;
+        diagCallbacks_ = 0;
+        diagMaxActiveVoices_ = 0;
+        diagPeak_ = 0;
+        diagSquareSum_ = 0;
+    }
+    
+
+
+    
     voices_.erase(std::remove_if(voices_.begin(), voices_.end(), [](auto& v) { return v->finished; }), voices_.end());
     auto approach = [](double& g, double target, double step) {
         if (step == 0 || g == target) return;
