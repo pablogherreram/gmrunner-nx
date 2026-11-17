@@ -1,12 +1,14 @@
 // draw_*, font_*, surface_*, shader_*, window_*, display_* and platform stubs (steam_*, os_*).
 #include <algorithm>
 #include <cmath>
+#include <sstream>
 
 #include "runtime/Builtins.h"
 #include "runtime/SkeletonSprites.h"
 #include "runtime/Graphics.h"
 #include "runtime/Runner.h"
 #include "runtime/Stores.h"
+#include "vm/Bytecode.h"
 #include "util/BuiltinFonts.h"
 #include "util/Fs.h"
 #include "util/Utf8.h"
@@ -209,6 +211,19 @@ GMFN(draw_circle) {
         rt.log("[gfxdiag4] draw_circle x=%.3f y=%.3f r=%.3f outline=%d color=%06x alpha=%.3f step=%llu caller=%s",
                D(0), D(1), D(2), B(3) ? 1 : 0, G.color & 0xFFFFFF, G.alpha,
                static_cast<unsigned long long>(rt.stepCount), rt.vm.callStack().c_str());
+        static bool dumpedStep2 = false;
+        if (!dumpedStep2) {
+            dumpedStep2 = true;
+            int code = rt.vm.currentCode();
+            if (code >= 0 && static_cast<size_t>(code) < rt.dw.code.size()) {
+                rt.log("[gfxdiag6] code index=%d name=%s", code, std::string(rt.dw.code[code].name).c_str());
+                std::istringstream lines(disassemble(rt.dw, rt.dw.code[code]));
+                std::string line;
+                while (std::getline(lines, line)) rt.log("[gfxdiag6] %s", line.c_str());
+            } else {
+                rt.log("[gfxdiag6] invalid current code index=%d", code);
+            }
+        }
         if (self && (rt.stepCount == self->createdStep || (rt.stepCount - self->createdStep) % 30 == 0)) {
             rt.log("[gfxdiag5] instance id=%d object=%d step=%llu age=%llu x=%.6f y=%.6f xprev=%.6f yprev=%.6f xstart=%.6f ystart=%.6f depth=%.6f image_index=%.6f image_speed=%.6f image_xscale=%.6f image_yscale=%.6f image_angle=%.6f image_alpha=%.6f speed=%.6f direction=%.6f hspeed=%.6f vspeed=%.6f timeline_index=%d timeline_position=%.6f timeline_speed=%.6f timeline_running=%d",
                    self->id, self->object, static_cast<unsigned long long>(rt.stepCount),
