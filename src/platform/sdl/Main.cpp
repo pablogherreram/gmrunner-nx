@@ -20,6 +20,9 @@
 #include "data/DataWin.h"
 #include "platform/sdl/Host.h"
 #include "platform/sdl/Target.h"
+#ifdef __SWITCH__
+#include "platform/sdl/SwitchAudio.h"
+#endif
 #include "render/GL.h"
 #include "render/Renderer.h"
 #include "runtime/Audio.h"
@@ -32,11 +35,13 @@ using namespace gm::host;
 
 namespace {
 
+#ifndef __SWITCH__
 constexpr int kQueuedAudioFrames = 1024;
 constexpr int kQueuedAudioChannels = 2;
 constexpr Uint32 kQueuedAudioBlockBytes =
     kQueuedAudioFrames * kQueuedAudioChannels * static_cast<Uint32>(sizeof(float));
 constexpr Uint32 kQueuedAudioTargetBlocks = 3;
+#endif
 
 std::string gameNameOf(const DataWin& dw) { return dw.gen.name.empty() ? "game" : std::string(dw.gen.name); }
 
@@ -266,7 +271,9 @@ int runOnce(int argc, char** argv) {
     Uint32 flags = SDL_INIT_TIMER | SDL_INIT_EVENTS;
     if (tgt.sdlControllers) flags |= SDL_INIT_GAMECONTROLLER;
     if (!opt.headless) flags |= SDL_INIT_VIDEO;
+#ifndef __SWITCH__
     if (!opt.mute && !opt.headless && opt.recordAudio.empty()) flags |= SDL_INIT_AUDIO;
+#endif
     // Keep Ctrl+C / kill working even if game code is stuck in a loop (SDL would turn the signal
     // into a quit event that a stuck loop never reads).
     SDL_SetHint(SDL_HINT_NO_SIGNAL_HANDLERS, "1");
@@ -295,8 +302,12 @@ int runOnce(int argc, char** argv) {
     platform.pads = &input.pads;
     // One game at a time; game_change replaces it (and its audio device) in the same window.
     std::unique_ptr<Runner> rt;
+#ifdef __SWITCH__
+    SwitchAudioOut nativeAudio;
+#else
     SDL_AudioDeviceID audioDev = 0;
     std::vector<float> queuedAudioBuffer(kQueuedAudioFrames * kQueuedAudioChannels);
+#endif
     auto startGame = [&](const std::vector<std::string>& params) {
         std::string saveDir = opt.saveDir.empty() ? targetSaveDir(gameName, opt.profileSaves) : opt.saveDir;
         makeDirs(saveDir);
@@ -320,6 +331,10 @@ int runOnce(int argc, char** argv) {
             input.menu.draw(r, w, h);
         };
         if (!opt.mute && !opt.headless && opt.recordAudio.empty()) {
+#ifdef __SWITCH__
+            if (!nativeAudio.ready()) nativeAudio.initialize();
+            rt->audioOutput = nativeAudio.ready();
+#else
             if (!audioDev) {
                 SDL_AudioSpec want{}, have{};
                 want.freq = Audio::kRate;
@@ -349,9 +364,13 @@ int runOnce(int argc, char** argv) {
                         SDL_GetQueuedAudioSize(audioDev));
             }
             rt->audioOutput = audioDev != 0;
+#endif
         }
     };
-    auto pumpQueuedAudio = [&]() {
+    auto pumpAudioOutput = [&]() {
+#ifdef __SWITCH__
+        nativeAudio.pump(rt ? rt->audio.get() : nullptr);
+#else
         if (!audioDev || !rt || opt.mute || opt.headless || !opt.recordAudio.empty()) return;
         const Uint32 target = kQueuedAudioBlockBytes * kQueuedAudioTargetBlocks;
         int blocks = 0;
@@ -363,6 +382,7 @@ int runOnce(int argc, char** argv) {
             }
             blocks++;
         }
+#endif
     };
     std::vector<std::string> params = {argv[0]};
     for (size_t i = 1; i < positional.size(); i++) params.push_back(positional[i]);  // the game's own arguments
@@ -388,6 +408,9 @@ int runOnce(int argc, char** argv) {
     std::string exitError;  // shown once SDL is shut down (the Switch console can't share the screen)
     auto changeGame = [&]() -> bool {
         std::string dir = rt->gameChangeDir, paramStr = rt->gameChangeParams;
+#ifdef __SWITCH__
+        nativeAudio.onGameChange();
+#else
         if (audioDev) {
             SDL_ClearQueuedAudio(audioDev);
             fprintf(stderr,
@@ -395,6 +418,7 @@ int runOnce(int argc, char** argv) {
                     audioDev, static_cast<int>(SDL_GetAudioDeviceStatus(audioDev)),
                     SDL_GetQueuedAudioSize(audioDev));
         }
+#endif
         rt.reset();
         std::string to = normalizePath(opt.gameDir + "/" + dir);
         std::vector<std::string> p = {argv[0]};
@@ -435,7 +459,7 @@ int runOnce(int argc, char** argv) {
     while (!quit) {
         if (!targetFrame()) break;
 
-        pumpQueuedAudio();
+        pumpAudioOutput();
 
         SDL_Event e;
         // In the background (a phone's home screen, the Switch's HOME menu): no drawing, no sound,
@@ -443,10 +467,14 @@ int runOnce(int argc, char** argv) {
         auto away = [] { return SDL_AtomicGet(&gBackground) || targetSuspended(); };
         if (away()) {
             fprintf(stderr, "[run] in the background at frame %ld: paused\n", frame);
+#ifdef __SWITCH__
+            nativeAudio.setPaused(true);
+#else
             if (audioDev) {
                 SDL_PauseAudioDevice(audioDev, 1);
                 SDL_ClearQueuedAudio(audioDev);
             }
+#endif
             input.touchPad.releaseAll(*rt);
             while (away() && !quit) {
                 if (SDL_WaitEventTimeout(&e, 100)) input.handleEvent(e, *rt, platform, opt, quit);
@@ -454,26 +482,38 @@ int runOnce(int argc, char** argv) {
             }
             if (quit) break;
             fprintf(stderr, "[run] back in the foreground: resumed\n");
+#ifdef __SWITCH__
+            nativeAudio.setPaused(false);
+#else
             if (audioDev) {
                 SDL_ClearQueuedAudio(audioDev);
                 SDL_PauseAudioDevice(audioDev, 0);
             }
+#endif
             nextFrame = platform.now();  // don't race to catch up on the time away
             continue;
         }
         if (input.menu.open) {  // the in-game menu: the game waits, silent, under it
+#ifdef __SWITCH__
+            nativeAudio.setPaused(true);
+#else
             if (audioDev) {
                 SDL_PauseAudioDevice(audioDev, 1);
                 SDL_ClearQueuedAudio(audioDev);
             }
+#endif
             while (SDL_PollEvent(&e)) input.handleEvent(e, *rt, platform, opt, quit);
             targetPollInput(*rt, input.buttons, opt, quit);
             input.menu.poll();
             input.menu.tick(*rt, platform.now());
+#ifdef __SWITCH__
+            if (!input.menu.open) nativeAudio.setPaused(false);
+#else
             if (!input.menu.open && audioDev) {
                 SDL_ClearQueuedAudio(audioDev);
                 SDL_PauseAudioDevice(audioDev, 0);
             }
+#endif
             if (platform.window) {
                 int w, h;
                 platform.drawableSize(w, h);
@@ -535,11 +575,15 @@ int runOnce(int argc, char** argv) {
     }
 
     dev.finish(opt);
+#ifdef __SWITCH__
+    nativeAudio.shutdown();
+#else
     if (audioDev) {
         SDL_PauseAudioDevice(audioDev, 1);
         SDL_ClearQueuedAudio(audioDev);
         SDL_CloseAudioDevice(audioDev);
     }
+#endif
     rt.reset();
     input.closeAll();
     if (glctx) SDL_GL_DeleteContext(glctx);
