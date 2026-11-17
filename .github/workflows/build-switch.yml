@@ -1,0 +1,87 @@
+name: Build Nintendo Switch NRO
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - investigacion/deltarune-runtime
+    paths:
+      - '.github/workflows/build-switch.yml'
+      - 'src/**'
+      - 'switch/**'
+      - 'tools/switch/**'
+      - 'third_party/**'
+      - 'Makefile.switch'
+      - 'VERSION'
+
+permissions:
+  contents: read
+
+jobs:
+  build-switch:
+    name: Build gmRunner NX for Nintendo Switch
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout gmRunner NX
+        uses: actions/checkout@v4
+
+      - name: Record build metadata
+        shell: bash
+        run: |
+          mkdir -p artifacts logs
+          {
+            echo "repository=${GITHUB_REPOSITORY}"
+            echo "ref=${GITHUB_REF}"
+            echo "commit=${GITHUB_SHA}"
+            echo "run_id=${GITHUB_RUN_ID}"
+            echo "run_number=${GITHUB_RUN_NUMBER}"
+            echo "version=$(tr -d '[:space:]' < VERSION)"
+          } | tee logs/build-metadata.txt
+
+      - name: Clone Borealis
+        shell: bash
+        run: |
+          rm -rf third_party/borealis
+          git clone --recursive --depth 1 https://github.com/xfangfang/borealis.git third_party/borealis
+          git -C third_party/borealis rev-parse HEAD | tee logs/borealis-commit.txt
+
+      - name: Pull devkitPro image
+        shell: bash
+        run: docker pull devkitpro/devkita64 2>&1 | tee logs/docker-pull.txt
+
+      - name: Build launcher and NRO
+        shell: bash
+        run: |
+          set -o pipefail
+          docker run --rm -e GMR_PRIVATE=0 -v "$GITHUB_WORKSPACE:/src" -w /src devkitpro/devkita64 sh -c 'set -eu; tools/switch/build-launcher.sh; make -f Makefile.switch clean; make -f Makefile.switch -j4' 2>&1 | tee logs/build-switch.txt
+
+      - name: Verify build output
+        shell: bash
+        run: |
+          test -f gmrunner.nro
+          cp gmrunner.nro artifacts/gmrunner-nx.nro
+          sha256sum artifacts/gmrunner-nx.nro | tee artifacts/gmrunner-nx.nro.sha256
+          ls -lh artifacts/gmrunner-nx.nro | tee logs/build-output.txt
+          file artifacts/gmrunner-nx.nro | tee -a logs/build-output.txt
+
+      - name: Upload Nintendo Switch build
+        uses: actions/upload-artifact@v4
+        with:
+          name: gmrunner-nx-switch-${{ github.run_number }}
+          path: |
+            artifacts/gmrunner-nx.nro
+            artifacts/gmrunner-nx.nro.sha256
+            logs/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload logs after failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gmrunner-nx-failed-build-logs-${{ github.run_number }}
+          path: logs/
+          if-no-files-found: warn
+          retention-days: 30
