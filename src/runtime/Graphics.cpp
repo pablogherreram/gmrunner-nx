@@ -888,6 +888,18 @@ void Graphics::drawEllipse(double x1, double y1, double x2, double y2, bool outl
             lastSrcA = blendSrcA_; lastDstA = blendDstA_;
         }
     }
+    if (rt_.debugTrace && surfaceGetTarget() == 2 && !outline && rx >= 39.5 && rx <= 40.5 && ry >= 39.5 && ry <= 40.5) {
+        const float* wm = r_.worldMatrix();
+        const float* vm = r_.viewMatrix();
+        const float* pm = r_.projMatrix();
+        int sx, sy, sw, sh;
+        r_.scissor(sx, sy, sw, sh);
+        rt_.log("[gfxdiag3] ellipse cx=%.2f cy=%.2f rx=%.2f ry=%.2f target=%d shader=%d viewport=%d,%d,%d,%d scissor=%d,%d,%d,%d world=[%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f] view=[%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f] proj=[%.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f %.5f]",
+                cx, cy, rx, ry, surfaceGetTarget(), shader_, vpX_, vpY_, vpW_, vpH_, sx, sy, sw, sh,
+                wm[0],wm[1],wm[2],wm[3],wm[4],wm[5],wm[6],wm[7],wm[8],wm[9],wm[10],wm[11],wm[12],wm[13],wm[14],wm[15],
+                vm[0],vm[1],vm[2],vm[3],vm[4],vm[5],vm[6],vm[7],vm[8],vm[9],vm[10],vm[11],vm[12],vm[13],vm[14],vm[15],
+                pm[0],pm[1],pm[2],pm[3],pm[4],pm[5],pm[6],pm[7],pm[8],pm[9],pm[10],pm[11],pm[12],pm[13],pm[14],pm[15]);
+    }
     int n = std::max(4, circlePrecision);
     uint32_t inner = packColor(c1, a), outer = packColor(c2, a);
     r_.setTexture(r_.whiteTexture());
