@@ -211,6 +211,23 @@ GMFN(draw_circle) {
         rt.log("[gfxdiag4] draw_circle x=%.3f y=%.3f r=%.3f outline=%d color=%06x alpha=%.3f step=%llu caller=%s",
                D(0), D(1), D(2), B(3) ? 1 : 0, G.color & 0xFFFFFF, G.alpha,
                static_cast<unsigned long long>(rt.stepCount), rt.vm.callStack().c_str());
+        static bool dumpedController = false;
+        if (!dumpedController) {
+            dumpedController = true;
+            const std::string wanted = "gml_Object_obj_ch3_PGS01A_Step_0";
+            int found = -1;
+            for (size_t ci = 0; ci < rt.dw.code.size(); ++ci) {
+                if (rt.dw.code[ci].name == wanted) { found = static_cast<int>(ci); break; }
+            }
+            if (found >= 0) {
+                rt.log("[gfxdiag8] code index=%d name=%s", found, wanted.c_str());
+                std::istringstream lines(disassemble(rt.dw, rt.dw.code[found]));
+                std::string line;
+                while (std::getline(lines, line)) rt.log("[gfxdiag8] %s", line.c_str());
+            } else {
+                rt.log("[gfxdiag8] code_not_found name=%s entries=%zu", wanted.c_str(), rt.dw.code.size());
+            }
+        }
         static bool dumpedStep2 = false;
         if (!dumpedStep2) {
             dumpedStep2 = true;
